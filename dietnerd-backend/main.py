@@ -14,7 +14,7 @@ from urllib.parse import unquote
 
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from helper_functions import * 
 
@@ -31,6 +31,7 @@ from collections import defaultdict
 logging.basicConfig(level=logging.INFO)
 
 update_queues = defaultdict(asyncio.Queue)
+session_memories: Dict[str, List[dict]] = {}
 
 app = FastAPI()
 
@@ -46,6 +47,8 @@ app.add_middleware(
 
 class QueryModel(BaseModel):
     user_query: str
+    browser_session_id: Optional[str] = None
+    new_session: bool = False
 
 disclaimer = """
 DietNerd is an exploratory tool designed to enrich your conversations with a registered dietitian or registered dietitian nutritionist, who can then review your profile before providing recommendations.
@@ -95,9 +98,10 @@ async def check_valid(question:str):
 
 @app.post("/process_query")
 async def process_query(query: QueryModel, background_tasks: BackgroundTasks):
-    session_id = str(uuid.uuid4())
-    background_tasks.add_task(process_user_query, query.user_query, session_id)
-    return JSONResponse({"session_id": session_id})
+    request_id = str(uuid.uuid4())
+    browser_session_id = query.browser_session_id or request_id
+    background_tasks.add_task(process_user_query, query.user_query, request_id, browser_session_id)
+    return JSONResponse({"session_id": request_id, "browser_session_id": browser_session_id})
 
 @app.get("/sse")
 async def sse(session_id: str = Query(default=None)):
@@ -119,7 +123,7 @@ async def event_generator(session_id: str):
     finally:
         del update_queues[session_id]
 
-def process_user_query(user_query, session_id):
+def process_user_query(user_query, session_id, browser_session_id=None):
     # Query Generation 
     start_poc = time.time()
     general_query, query_contention, query_list = query_generation(user_query)
