@@ -262,11 +262,14 @@ async def sim_score(question: str):
    for x in myresult:
       resultdict.append(x[0])
 
+   if not resultdict:
+      return []
+
    scores_dict = calculate_similarity(resultdict, question)
    print(scores_dict)
 
    min_heap = []
-      
+
    for item in scores_dict:
       score = item[0]
       sentence = item[1]
