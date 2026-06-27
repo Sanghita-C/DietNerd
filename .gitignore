@@ -1,2 +1,8 @@
 env.js
+venv/
+__pycache__/
+*.pyc
+node_modules/
+dump_test/
+ATT81274.env
 
