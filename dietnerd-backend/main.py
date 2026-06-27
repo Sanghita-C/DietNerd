@@ -100,7 +100,7 @@ async def check_valid(question:str):
 async def process_query(query: QueryModel, background_tasks: BackgroundTasks):
     request_id = str(uuid.uuid4())
     browser_session_id = query.browser_session_id or request_id
-    background_tasks.add_task(process_user_query, query.user_query, request_id, browser_session_id)
+    background_tasks.add_task(process_user_query, query.user_query, request_id, browser_session_id, query.new_session)
     return JSONResponse({"session_id": request_id, "browser_session_id": browser_session_id})
 
 @app.get("/sse")
@@ -123,7 +123,7 @@ async def event_generator(session_id: str):
     finally:
         del update_queues[session_id]
 
-def process_user_query(user_query, session_id, browser_session_id=None):
+def process_user_query(user_query, session_id, browser_session_id=None, new_session=True):
     # Query Generation 
     start_poc = time.time()
     general_query, query_contention, query_list = query_generation(user_query)

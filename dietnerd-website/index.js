@@ -1,5 +1,11 @@
 
 const baseURL = window.env.API_URL;  // Adjust the base URL as needed
+
+const isNewSession = !localStorage.getItem('browser_session_id');
+if (isNewSession) {
+    localStorage.setItem('browser_session_id', crypto.randomUUID());
+}
+const browserSessionId = localStorage.getItem('browser_session_id');
 const disclaimer = `
 DietNerd is an exploratory tool designed to enrich your conversations with a registered dietitian or registered dietitian nutritionist, who can then review your profile before providing recommendations.
 Please be aware that the insights provided by DietNerd may not fully take into consideration all potential medication interactions or pre-existing conditions.
@@ -444,7 +450,7 @@ async function runGeneration(userQuery) {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ user_query: userQuery }),
+                body: JSON.stringify({ user_query: userQuery, browser_session_id: browserSessionId, new_session: isNewSession }),
             });
             const data = await response.json();
             const sessionId = data.session_id;
