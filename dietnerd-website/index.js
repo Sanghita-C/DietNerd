@@ -1,11 +1,17 @@
 
 const baseURL = window.env.API_URL;  // Adjust the base URL as needed
 
-const isNewSession = !localStorage.getItem('browser_session_id');
-if (isNewSession) {
-    localStorage.setItem('browser_session_id', crypto.randomUUID());
+function getSessionMemory() {
+    const raw = sessionStorage.getItem('session_memory');
+    return raw ? JSON.parse(raw) : [];
 }
-const browserSessionId = localStorage.getItem('browser_session_id');
+
+function appendToSessionMemory(entry) {
+    const memory = getSessionMemory();
+    memory.push(entry);
+    sessionStorage.setItem('session_memory', JSON.stringify(memory));
+    console.log('[SESSION MEMORY] Appended entry. Total entries:', memory.length, entry);
+}
 const disclaimer = `
 DietNerd is an exploratory tool designed to enrich your conversations with a registered dietitian or registered dietitian nutritionist, who can then review your profile before providing recommendations.
 Please be aware that the insights provided by DietNerd may not fully take into consideration all potential medication interactions or pre-existing conditions.
@@ -450,7 +456,7 @@ async function runGeneration(userQuery) {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ user_query: userQuery, browser_session_id: browserSessionId, new_session: isNewSession }),
+                body: JSON.stringify({ user_query: userQuery, session_memory: getSessionMemory() }),
             });
             const data = await response.json();
             const sessionId = data.session_id;
@@ -470,8 +476,11 @@ async function runGeneration(userQuery) {
                     // Check if this is the final update
                     if (data.update.end_output) {
                         console.log("Received final update. Closing EventSource.");
+                        if (data.update.session_memory_entry) {
+                            appendToSessionMemory(data.update.session_memory_entry);
+                        }
                         eventSource.close();
-                        resolve(); // Resolve the promise when we get the final output
+                        resolve(data.update); // Resolve with the full update object
                     } else {
                         answerElement.innerText += `${data.update}\n`;
                     }
@@ -518,8 +527,43 @@ document.getElementById('submit').addEventListener('click', async (event) => {
     if (question) {
         answerElement.innerHTML = '';
         referencesElement.innerHTML = '';
+
+        // Check session memory only if there's history
+        if (getSessionMemory().length === 0) {
+            console.log('[SESSION MEMORY] No history — skipping session memory check');
+        }
+        if (getSessionMemory().length > 0) try {
+                const sessionRes = await fetch(`${baseURL}/check_session_memory`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_query: question, session_memory: getSessionMemory() })
+                });
+                const sessionData = await sessionRes.json();
+                console.log('[SESSION MEMORY] check result:', sessionData);
+                if (sessionData.answered) {
+                    console.log('[SESSION MEMORY] Answered from session memory — skipping DB and pipeline');
+                    resultsElement.style.display = 'flex';
+                    answerElement.innerHTML = formatText(sessionData.answer);
+                    referencesElement.innerHTML = '';
+                    hintElement.textContent = '';
+                    generatePdfButton.classList.remove("hidden");
+                    exampleQuestions.classList.add('hidden');
+                    localStorage.setItem('rawOutput', sessionData.answer);
+                    appendToSessionMemory({
+                        raw_question: question,
+                        standalone_question: sessionData.standalone_question,
+                        answer: sessionData.answer,
+                        "Topic of discussion": []
+                    });
+                    return;
+                }
+        } catch (err) {
+            console.log('[SESSION MEMORY] check failed, proceeding to normal flow:', err);
+        }
+
         try {
             const answer = await getAnswer(question);
+
             console.log("Retrieved Answer:" + answer);
             resultsElement.style.display = 'flex';
             const formattedAnswer = formatText(answer);
@@ -530,6 +574,12 @@ document.getElementById('submit').addEventListener('click', async (event) => {
             hintElement.textContent = '';
             generatePdfButton.classList.remove("hidden");
             exampleQuestions.classList.add('hidden');
+            appendToSessionMemory({
+                raw_question: question,
+                standalone_question: question,
+                answer: answer,
+                "Topic of discussion": []
+            });
         } catch (error) {
             console.log(error)
             console.log('Not in database, retrieving similiar queries...');
@@ -570,10 +620,16 @@ document.getElementById('submit').addEventListener('click', async (event) => {
                         answerElement.innerText = checkValidResponse;
                         return;
                     }
-                    await runGeneration(question)
-                    document.getElementById('question').value = question;
-                    document.getElementById('submit').click();
-
+                    const result = await runGeneration(question)
+                    const answer = result.end_output;
+                    resultsElement.style.display = 'flex';
+                    similarQuestionsContainer.style.display = 'none';
+                    answerElement.innerHTML = formatText(answer);
+                    referencesElement.innerHTML = formatReferences(answer);
+                    localStorage.setItem('rawOutput', answer);
+                    hintElement.textContent = '';
+                    generatePdfButton.classList.remove("hidden");
+                    exampleQuestions.classList.add('hidden');
 
                 } catch (err) {
                     console.log(err)

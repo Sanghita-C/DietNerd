@@ -20,6 +20,8 @@ import ast
 import mysql.connector
 from mysql.connector import Error
 from scipy import spatial # for calculating vector similarities for search
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 import json
 import itertools
 import fitz
@@ -1787,3 +1789,137 @@ def write_output_to_db(user_query, final_output, all_relevant_articles, total_ru
   #     json.dump(return_obj, f, indent=4)
 
   upload_to_final(env_file, user_query, return_obj)
+
+
+def generate_standalone_question(raw_question: str, session_memory: list) -> str:
+  if not session_memory:
+    return raw_question
+
+  history_text = "\n".join(
+    [f"Q: {m['raw_question']}\nA: {m['answer']}" for m in session_memory]
+  )
+
+  response = client.chat.completions.create(
+    model="gpt-4-turbo",
+    messages=[
+      {
+        "role": "system",
+        "content": (
+          "Given the conversation history and a follow-up question, rephrase the follow-up "
+          "into a fully self-contained standalone question that can be understood without the history. "
+          "If the question is already standalone, return it as-is. Return only the question, nothing else."
+        )
+      },
+      {
+        "role": "user",
+        "content": f"Conversation history:\n{history_text}\n\nFollow-up question: {raw_question}"
+      }
+    ],
+    temperature=0
+  )
+  standalone_q = response.choices[0].message.content.strip()
+  print(f"[STANDALONE QUESTION] raw='{raw_question}' | standalone='{standalone_q}'")
+  return standalone_q
+
+
+def _check_entry_relevance(entry: dict, standalone_question: str) -> tuple:
+  response = client.chat.completions.create(
+    model="gpt-3.5-turbo-0125",
+    messages=[
+      {
+        "role": "system",
+        "content": (
+          "You are given a past Q&A entry from a nutrition session and a new question. "
+          "Respond with YES if the entry is relevant and could help answer the new question, otherwise NO."
+        )
+      },
+      {
+        "role": "user",
+        "content": (
+          f"Past Q: {entry['raw_question']}\n"
+          f"Past A: {entry['answer']}\n"
+          f"Topics: {', '.join(entry.get('Topic of discussion', []))}\n\n"
+          f"New question: {standalone_question}"
+        )
+      }
+    ],
+    temperature=0
+  )
+  answer = response.choices[0].message.content.strip().upper()
+  return entry, answer == "YES"
+
+def get_relevant_session_context(standalone_question: str, session_memory: list) -> list:
+  if not session_memory:
+    return []
+
+  relevant = []
+  with ThreadPoolExecutor(max_workers=8) as executor:
+    futures = [executor.submit(_check_entry_relevance, entry, standalone_question) for entry in session_memory]
+    for future in as_completed(futures):
+      entry, is_relevant = future.result()
+      print(f"[CONTEXT RELEVANCE] Q: '{entry['raw_question']}' | relevant={is_relevant}")
+      if is_relevant:
+        relevant.append(entry)
+
+  print(f"[CONTEXT RELEVANCE] {len(relevant)}/{len(session_memory)} entries selected as relevant for: '{standalone_question}'")
+  return relevant
+
+
+def try_answer_from_context(standalone_question: str, relevant_context: list):
+  if not relevant_context:
+    return False, None
+
+  context_text = "\n\n".join([
+    f"Q: {entry['raw_question']}\nA: {entry['answer']}"
+    for entry in relevant_context
+  ])
+
+  response = client.chat.completions.create(
+    model="gpt-3.5-turbo-0125",
+    messages=[
+      {
+        "role": "system",
+        "content": (
+          "You are a nutrition assistant. You are given context from previous Q&A in a session. "
+          "If the context contains enough information to fully answer the new question, answer it. "
+          "If the context is insufficient, respond with exactly: INSUFFICIENT"
+        )
+      },
+      {
+        "role": "user",
+        "content": f"Context:\n{context_text}\n\nQuestion: {standalone_question}"
+      }
+    ],
+    temperature=0
+  )
+
+  answer = response.choices[0].message.content.strip()
+  if answer.upper() == "INSUFFICIENT":
+    return False, None
+  return True, answer
+
+
+def extract_topics(question: str, answer: str) -> list:
+  response = client.chat.completions.create(
+    model="gpt-4-turbo",
+    messages=[
+      {
+        "role": "system",
+        "content": (
+          "Extract the key medical/nutritional topics from the question and answer. "
+          "Return a JSON array of short topic strings (e.g. [\"PCOS\", \"metformin\", \"insulin resistance\"]). "
+          "Return only the JSON array, nothing else."
+        )
+      },
+      {
+        "role": "user",
+        "content": f"Question: {question}\n\nAnswer: {answer}"
+      }
+    ],
+    temperature=0
+  )
+  raw = response.choices[0].message.content.strip()
+  try:
+    return json.loads(raw)
+  except Exception:
+    return []

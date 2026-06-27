@@ -31,7 +31,6 @@ from collections import defaultdict
 logging.basicConfig(level=logging.INFO)
 
 update_queues = defaultdict(asyncio.Queue)
-session_memories: Dict[str, List[dict]] = {}
 
 app = FastAPI()
 
@@ -47,8 +46,7 @@ app.add_middleware(
 
 class QueryModel(BaseModel):
     user_query: str
-    browser_session_id: Optional[str] = None
-    new_session: bool = False
+    session_memory: List[dict] = []
 
 disclaimer = """
 DietNerd is an exploratory tool designed to enrich your conversations with a registered dietitian or registered dietitian nutritionist, who can then review your profile before providing recommendations.
@@ -96,12 +94,28 @@ async def check_valid(question:str):
     final_output = "good"
    return {"response" : final_output}
 
+class SessionMemoryCheckModel(BaseModel):
+    user_query: str
+    session_memory: List[dict] = []
+
+@app.post("/check_session_memory")
+async def check_session_memory(body: SessionMemoryCheckModel):
+    history = body.session_memory
+    logging.info(f"[SESSION MEMORY] /check_session_memory called | session_memory_empty={len(history) == 0} | history_length={len(history)}")
+    if not history:
+        logging.info("[SESSION MEMORY] Session memory is EMPTY — skipping check, going to normal flow")
+        return JSONResponse({"answered": False, "answer": None})
+    standalone_q = generate_standalone_question(body.user_query, history)
+    relevant_context = get_relevant_session_context(standalone_q, history)
+    can_answer, answer = try_answer_from_context(standalone_q, relevant_context)
+    logging.info(f"[SESSION MEMORY] can_answer={can_answer} | standalone_q='{standalone_q}'")
+    return JSONResponse({"answered": can_answer, "answer": answer, "standalone_question": standalone_q})
+
 @app.post("/process_query")
 async def process_query(query: QueryModel, background_tasks: BackgroundTasks):
     request_id = str(uuid.uuid4())
-    browser_session_id = query.browser_session_id or request_id
-    background_tasks.add_task(process_user_query, query.user_query, request_id, browser_session_id, query.new_session)
-    return JSONResponse({"session_id": request_id, "browser_session_id": browser_session_id})
+    background_tasks.add_task(process_user_query, query.user_query, request_id, query.session_memory)
+    return JSONResponse({"session_id": request_id})
 
 @app.get("/sse")
 async def sse(session_id: str = Query(default=None)):
@@ -123,8 +137,15 @@ async def event_generator(session_id: str):
     finally:
         del update_queues[session_id]
 
-def process_user_query(user_query, session_id, browser_session_id=None, new_session=True):
-    # Query Generation 
+def process_user_query(user_query, session_id, session_memory=None):
+    session_memory = session_memory or []
+    raw_question = user_query
+
+    if session_memory:
+        user_query = generate_standalone_question(user_query, session_memory)
+        logging.info(f"[SESSION MEMORY] Standalone question generated: '{user_query}'")
+
+    # Query Generation
     start_poc = time.time()
     general_query, query_contention, query_list = query_generation(user_query)
     end_poc = time.time()
@@ -220,6 +241,15 @@ def process_user_query(user_query, session_id, browser_session_id=None, new_sess
     return_obj["citations_obj"] = updated_citations
     return_obj["citations"] = citations
     
+    topics = extract_topics(raw_question, final_output)
+    return_obj["session_memory_entry"] = {
+        "raw_question": raw_question,
+        "standalone_question": user_query,
+        "answer": final_output,
+        "Topic of discussion": topics
+    }
+    logging.info(f"[SESSION MEMORY] Entry created | topics={topics}")
+
     loop.run_until_complete(send_update(session_id, return_obj))
 
     return return_obj
